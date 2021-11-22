@@ -1,0 +1,161 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Description: >
+  This template will create resources required for
+  Text2Speech API.
+
+  Resources used in this project.
+  S3 - 1
+  SQS - 1
+  Lambda - 3
+  API Gateway
+  Roles and Policies
+  Amazon Polly
+  SES
+
+Resources:
+  TTSS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-${AWS::Region}-texttospeech"
+      LifecycleConfiguration:
+        Rules:
+          - ExpirationInDays: 1
+            Status: Enabled
+
+  TTSSQS:
+    Type: AWS::SQS::Queue
+    Properties:
+      DelaySeconds: 60
+      MessageRetentionPeriod: 3600
+      QueueName: !Sub "${AWS::StackName}-${AWS::Region}-ModifyS3ObjectPermissionsQ"
+      ReceiveMessageWaitTimeSeconds: 20
+      VisibilityTimeout: 120
+
+  TTSRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      RoleName: !Sub "${AWS::StackName}-${AWS::Region}-TTSRole"
+
+  TTSPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub "${AWS::StackName}-${AWS::Region}-TTSPolicy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - 'sqs:SendMessage'
+              - 'sqs:ReceiveMessage'
+              - 'sqs:DeleteMessage'
+              - 'sqs:GetQueueAttributes'
+              - 's3:PutObject'
+              - 's3:PutObjectAcl'
+              - 's3:GetObject'
+              - 'ses:CreateEmailIdentity'
+              - 'ses:GetEmailIdentity'
+              - 'ses:SendEmail'
+              - 'polly:StartSpeechSynthesisTask'
+              - 'logs:*'
+            Resource: '*'
+      Roles:
+        - !Ref TTSRole
+
+  ApiGatewayTTS:
+    Type: AWS::Serverless::Api
+    MethodSettings:
+      HttpMethod: '*'
+      ResourcePath: '*/'
+    Properties:
+      Name: !Sub "${AWS::StackName}-${AWS::Region}-TTSAPIGateway"
+      StageName: test
+      Cors:
+        AllowOrigin: "'*'"
+        AllowMethods: "'OPTIONS,HEAD,GET,PUT,POST,DELETE'"
+
+  AddEmailToSES:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./TTSLambdaFunctions/AddingEmail
+      Handler: AddemailtoSES.lambda_handler
+      Role: !GetAtt TTSRole.Arn
+      Runtime: python3.8
+      Timeout: 5
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref TTSS3Bucket
+          QUEUE_URL: !Ref TTSSQS
+          REGION: !Sub "${AWS::Region}"
+      Events:
+        VerifyEmail:
+          Type: Api
+          Properties:
+            Path: /verifyemail
+            Method: post
+            RestApiId: !Ref ApiGatewayTTS
+
+  TextToSpeech:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./TTSLambdaFunctions/TextToSpeech
+      Handler: Text2Speech.lambda_handler
+      Role: !GetAtt TTSRole.Arn
+      Runtime: python3.8
+      Timeout: 5
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref TTSS3Bucket
+          QUEUE_URL: !Ref TTSSQS
+          REGION: !Sub "${AWS::Region}"
+      Events:
+        TextToSpeech:
+          Type: Api
+          Properties:
+            Path: /texttospeech
+            Method: post
+            RestApiId: !Ref ApiGatewayTTS
+      EventInvokeConfig:
+        MaximumEventAgeInSeconds: 60
+        MaximumRetryAttempts: 0
+        DestinationConfig:
+          OnSuccess:
+            Type: SQS
+            Destination: !GetAtt TTSSQS.Arn
+
+  ModifyS3Permissions:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./TTSLambdaFunctions/ModifyS3Permissions
+      Handler: ModifyS3Permissions.lambda_handler
+      Role: !GetAtt TTSRole.Arn
+      Runtime: python3.8
+      Timeout: 5
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref TTSS3Bucket
+          QUEUE_URL: !Ref TTSSQS
+          REGION: !Sub "${AWS::Region}"
+          SENDER_EMAIL: 'msvsr11297@gmail.com'
+      Events:
+        ModifyS3ObjectPermissionsEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt TTSSQS.Arn
+            BatchSize: 1
+            Enabled: True
+
+      EventInvokeConfig:
+        MaximumEventAgeInSeconds: 60
+        MaximumRetryAttempts: 0
+
+
